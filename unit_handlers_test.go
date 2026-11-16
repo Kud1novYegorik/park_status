@@ -5,12 +5,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
+var testUnitCounter atomic.Uint64
+
 func testUnitID() string {
-	return fmt.Sprintf("test-%d", time.Now().UnixNano())
+	return fmt.Sprintf("test-unit-%d", testUnitCounter.Add(1))
 }
 
 func TestGetUnitFetchesAndCachesProviderResponse(t *testing.T) {
