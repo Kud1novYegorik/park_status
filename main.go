@@ -66,7 +66,7 @@ func main() {
 	mux.HandleFunc("POST /provider/source", setSource)
 	mux.HandleFunc("GET /stats", stats)
 	// Заглушки до шагов 3–5.
-	mux.HandleFunc("POST /import", notImplemented)
+	mux.HandleFunc("POST /import", importHandler)
 	mux.HandleFunc("GET /units/{id}", notImplemented)
 	mux.HandleFunc("DELETE /units/{id}", notImplemented)
 	mux.HandleFunc("GET /summary", notImplemented)
