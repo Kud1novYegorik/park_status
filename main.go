@@ -1,81 +1,108 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
-	"net/url"
-	"strings"
-	"sync/atomic"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 )
 
-// Состояние процесса. Хранилище машин появится на шаге 2.
-var (
-	providerURL    atomic.Pointer[string]
-	servedLocal    atomic.Int64
-	servedProvider atomic.Int64
-	providerReads  atomic.Int64
+const (
+	serverAddr = ":8000"
 )
+
+func main() {
+	// Адрес телематического провайдера задаётся через переменную окружения.
+	providerURL := os.Getenv("PROVIDER_URL")
+
+	var providerClient *ProviderClient
+
+	if providerURL != "" {
+		client, err := NewProviderClient(providerURL)
+		if err != nil {
+			log.Fatalf("create provider client: %v", err)
+		}
+		providerClient = client
+		log.Printf("provider configured: %s", providerURL)
+	} else {
+		log.Println("provider is not configured; local-only mode")
+	}
+
+	mux := http.NewServeMux()
+
+	// Импорт полного snapshot от телематического провайдера.
+	mux.HandleFunc("/import", importHandler)
+
+	// Получение и удаление информации о машине.
+	mux.Handle("/units/", NewUnitHandler(providerClient))
+	mux.HandleFunc("/summary", summaryHandler)
+
+	// Статистика сервиса.
+	mux.HandleFunc("/stats", statsHandler(providerClient))
+
+	server := &http.Server{
+		Addr:              serverAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+
+	// Контекст для корректного завершения сервера.
+	ctx, stop := signal.NotifyContext(
+		context.Background(),
+		os.Interrupt,
+		syscall.SIGTERM,
+	)
+	defer stop()
+
+	go func() {
+		<-ctx.Done()
+
+		shutdownCtx, cancel := context.WithTimeout(
+			context.Background(),
+			10*time.Second,
+		)
+		defer cancel()
+
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			log.Printf("server shutdown: %v", err)
+		}
+	}()
+
+	log.Printf("server listening on %s", serverAddr)
+
+	if err := server.ListenAndServe(); err != nil &&
+		!errors.Is(err, http.ErrServerClosed) {
+		log.Fatalf("server failed: %v", err)
+	}
+
+	log.Println("server stopped")
+}
+
+func statsHandler(provider *ProviderClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		stats := UnitStatsSnapshot(provider)
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(stats); err != nil {
+			log.Printf("encode stats: %v", err)
+		}
+	}
+}
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(v)
-}
-
-func notImplemented(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusNotImplemented, map[string]string{"detail": "not implemented"})
-}
-
-func health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, 200, map[string]string{"status": "healthy"})
-}
-
-func setSource(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		URL string `json:"url"`
-	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
-		writeJSON(w, 400, map[string]string{"detail": "bad json"})
-		return
-	}
-	u, err := url.Parse(req.URL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		writeJSON(w, 400, map[string]string{"detail": "bad url"})
-		return
-	}
-	s := strings.TrimRight(req.URL, "/")
-	providerURL.Store(&s)
-	// ponytail: шаг 4 — здесь же сбросить breaker и лимитер.
-	writeJSON(w, 200, map[string]string{"source": req.URL})
-}
-
-func stats(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, 200, map[string]int64{
-		"served_local":         servedLocal.Load(),
-		"served_from_provider": servedProvider.Load(),
-		"provider_reads":       providerReads.Load(),
-		"units":                0, // шаг 2
-	})
-}
-
-func main() {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", health)
-	mux.HandleFunc("POST /provider/source", setSource)
-	mux.HandleFunc("GET /stats", stats)
-	// Заглушки до шагов 3–5.
-	mux.HandleFunc("POST /import", importHandler)
-	mux.HandleFunc("GET /units/{id}", notImplemented)
-	mux.HandleFunc("DELETE /units/{id}", notImplemented)
-	mux.HandleFunc("GET /summary", notImplemented)
-
-	srv := &http.Server{
-		Addr:              ":8000",
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
-	log.Fatal(srv.ListenAndServe())
 }

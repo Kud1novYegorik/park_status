@@ -263,6 +263,31 @@ func Delete(unit string, now int64) bool {
 	return true
 }
 
+// Tombstone помечает машину удалённой, даже если локальной записи нет.
+// Возвращает true, если существовала локальная запись.
+func Tombstone(unit string, now int64) bool {
+	s := shardOf(unit)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, existed := s.m[unit]
+	if existed {
+		delete(s.m, unit)
+		nUnits.Add(-1)
+	}
+
+	old, hasTombstone := s.dead[unit]
+	if !hasTombstone || now > old {
+		s.dead[unit] = now
+	}
+
+	if existed || !hasTombstone || now > old {
+		epoch.Add(1)
+	}
+
+	return existed
+}
+
 // Sweep вызывается после успешного приёма снимка: кого он не подтвердил
 // (conf < taken_at), у провайдера на тот момент не было.
 func Sweep(takenAt int64) (dropped int) {
